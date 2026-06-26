@@ -173,13 +173,23 @@ function requestContacts() {
   }
 }
 
+function isE164(s) {
+  return typeof s === "string" && /^\+\d{6,15}$/.test(s);
+}
+
 function flushContacts() {
   if (!EXPORT_CONTACTS || contactsTimer) return;
   contactsTimer = setTimeout(() => {
     contactsTimer = null;
     const records = [];
-    for (const [number, name] of sigContacts) {
-      records.push({ e164: number, handle: number, name: name || null });
+    for (const [id, name] of sigContacts) {
+      // Only a real +E.164 is a number the bridge can merge on; a UUID/username
+      // identity stays channel-local (e164 null, keyed by its handle).
+      records.push({
+        e164: isE164(id) ? id : null,
+        handle: id,
+        name: name || null,
+      });
     }
     try {
       bridge.writeContacts("signal", records);
@@ -197,16 +207,24 @@ function ingestContacts(list) {
   let changed = false;
   for (const c of list) {
     if (!c) continue;
-    const number = c.number || (c.address && c.address.number);
-    if (!number) continue; // username/UUID-only: no E.164, skip
+    // Identifier: prefer the phone number, else the ACI/UUID (number-private
+    // contacts). Never invent a number — a UUID is a valid stable identity and
+    // is exported channel-local (see flushContacts).
+    const id =
+      c.number ||
+      c.uuid ||
+      c.aci ||
+      (c.address && (c.address.number || c.address.uuid)) ||
+      null;
+    if (!id) continue;
     const name =
       c.name ||
       c.profileName ||
       (c.profile && (c.profile.givenName || c.profile.name)) ||
-      sigContacts.get(number) ||
+      sigContacts.get(id) ||
       null;
-    if (sigContacts.get(number) !== name) {
-      sigContacts.set(number, name);
+    if (sigContacts.get(id) !== name) {
+      sigContacts.set(id, name);
       changed = true;
     }
   }
@@ -230,9 +248,14 @@ function handleLine(line) {
   const data = env.dataMessage;
   // Only real incoming text (skip receipts, typing, sync of our own messages).
   if (!data || typeof data.message !== "string" || !data.message) return;
-  const from = env.sourceNumber || env.source;
+  // Prefer the phone number (signal-cli resolves it locally for known
+  // contacts); fall back to the explicit ACI/UUID for number-private senders,
+  // never the ambiguous `source'. Either way the same sender maps to the same
+  // stable identity, so a reply is never seen as a different person.
+  const from = env.sourceNumber || env.sourceUuid || env.source;
   if (!from) return;
-  // Learn a contact name from whoever messages us (enrichment, any sender).
+  // Learn a contact name from whoever messages us (enrichment, any sender);
+  // ingestContacts keeps a UUID identity channel-local (no fake e164).
   if (env.sourceName) ingestContacts([{ number: from, name: env.sourceName }]);
   if (ALLOWED.length === 0 || !ALLOWED.includes(from)) {
     console.log(
