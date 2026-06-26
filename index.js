@@ -61,6 +61,8 @@ const POLL_MS = parseInt(process.env.SIGNAL_POLL_MS || "500", 10);
 const EXPORT_CONTACTS =
   (process.env.SIGNAL_EXPORT_CONTACTS || "true") !== "false";
 const CONTACTS_MS = parseInt(process.env.SIGNAL_CONTACTS_MS || "1800000", 10);
+// Relay your own "Note to Self" entries as inbound (private self-coaching chat).
+const NOTE_TO_SELF = (process.env.SIGNAL_NOTE_TO_SELF || "true") !== "false";
 
 if (!ACCOUNT) {
   console.error("[sig] SIGNAL_ACCOUNT not set (your linked +E.164 number)");
@@ -141,10 +143,18 @@ function start() {
   );
 }
 
+// Echo filter for the Note-to-Self coach loop: a message WE send to self comes
+// back as a synced sentMessage; record its timestamp so we never relay our own
+// coach reply back as if the user had typed it.
+const pendingSelfSendIds = new Set(); // rpc id awaiting its send result
+const selfSentTimestamps = new Set(); // timestamps of our own self-sends
+
 function send(recipient, text) {
+  const id = String(++rpcId);
+  if (recipient === ACCOUNT) pendingSelfSendIds.add(id);
   const req = {
     jsonrpc: "2.0",
-    id: String(++rpcId),
+    id,
     method: "send",
     params: { recipient: [recipient], message: text },
   };
@@ -243,8 +253,50 @@ function handleLine(line) {
     ingestContacts(msg.result);
     return;
   }
+  // Our own send's result: record the timestamp of a Note-to-Self send so its
+  // synced echo (below) is not relayed back as if the user typed it.
+  if (msg.id && pendingSelfSendIds.has(msg.id)) {
+    pendingSelfSendIds.delete(msg.id);
+    const ts = msg.result && msg.result.timestamp;
+    if (ts) {
+      selfSentTimestamps.add(ts);
+      const t = setTimeout(() => selfSentTimestamps.delete(ts), 5 * 60 * 1000);
+      if (t.unref) t.unref();
+    }
+    return;
+  }
   if (msg.method !== "receive" || !msg.params) return;
   const env = msg.params.envelope || {};
+  // Note-to-Self: text you type in your own "Note to Self" chat syncs to this
+  // linked device as syncMessage.sentMessage with destination == self. Treat it
+  // as inbound from you (the private coach chat), filtering our own coach echoes.
+  const sent = env.syncMessage && env.syncMessage.sentMessage;
+  if (sent) {
+    const dest = sent.destinationNumber || sent.destination;
+    if (
+      NOTE_TO_SELF &&
+      dest === ACCOUNT &&
+      typeof sent.message === "string" &&
+      sent.message &&
+      !sent.groupInfo &&
+      !selfSentTimestamps.has(sent.timestamp)
+    ) {
+      const id = bridge.writeInbound({
+        channel: "signal",
+        chat: ACCOUNT,
+        text: sent.message,
+        meta: {
+          name: "Note to Self",
+          timestamp: sent.timestamp,
+          noteToSelf: true,
+        },
+      });
+      console.log(
+        `[sig] <- (note-to-self) ${sent.message.slice(0, 60)} (inbox ${id})`
+      );
+    }
+    return; // sync messages are never normal inbound
+  }
   const data = env.dataMessage;
   // Only real incoming text (skip receipts, typing, sync of our own messages).
   if (!data || typeof data.message !== "string" || !data.message) return;
