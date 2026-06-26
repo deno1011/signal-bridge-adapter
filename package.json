@@ -1,0 +1,19 @@
+{
+  "name": "signal-bridge-adapter",
+  "version": "0.1.0",
+  "description": "Signal (signal-cli) adapter for emacs-messenger-bridge: relays messages between Signal and the file bridge.",
+  "license": "MIT",
+  "author": "Denis Butic <d.e.n.o@gmx.net>",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "link": "node link.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  }
+}
