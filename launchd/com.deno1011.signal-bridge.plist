@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Run the Signal bridge adapter as a background service (launchd).
-     EDIT __NODE_BINARY__ and __ADAPTER_DIR__, then:
+     EDIT __NODE_BINARY__ and __ADAPTER_DIR__, and the PATH below if your
+     Homebrew prefix differs, then:
        cp to ~/Library/LaunchAgents/ ; launchctl load <plist>
-     Link signal-cli once (npm run link) before relying on the service. -->
+     Link signal-cli once (npm run link) before relying on the service.
+     The PATH is required: launchd's default PATH omits Homebrew, so the
+     adapter could not find the `signal-cli' binary it spawns. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -10,6 +13,8 @@
   <key>ProgramArguments</key>
   <array><string>__NODE_BINARY__</string><string>__ADAPTER_DIR__/index.js</string></array>
   <key>WorkingDirectory</key><string>__ADAPTER_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/tmp/signal-bridge.out.log</string>
