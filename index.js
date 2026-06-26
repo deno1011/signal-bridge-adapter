@@ -248,6 +248,9 @@ function handleLine(line) {
   const data = env.dataMessage;
   // Only real incoming text (skip receipts, typing, sync of our own messages).
   if (!data || typeof data.message !== "string" || !data.message) return;
+  // Personal 1:1 only — ignore group messages (a reply must not misroute to a
+  // single member as if it were a direct chat).
+  if (data.groupInfo) return;
   // Prefer the phone number (signal-cli resolves it locally for known
   // contacts); fall back to the explicit ACI/UUID for number-private senders,
   // never the ambiguous `source'. Either way the same sender maps to the same
