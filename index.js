@@ -58,6 +58,9 @@ const ALLOWED = (process.env.SIGNAL_ALLOWED || "")
   .map((s) => s.trim())
   .filter(Boolean);
 const POLL_MS = parseInt(process.env.SIGNAL_POLL_MS || "500", 10);
+const EXPORT_CONTACTS =
+  (process.env.SIGNAL_EXPORT_CONTACTS || "true") !== "false";
+const CONTACTS_MS = parseInt(process.env.SIGNAL_CONTACTS_MS || "1800000", 10);
 
 if (!ACCOUNT) {
   console.error("[sig] SIGNAL_ACCOUNT not set (your linked +E.164 number)");
@@ -121,6 +124,12 @@ function start() {
 
   restartAttempts = 0;
 
+  // Pull contacts shortly after connect, then refresh periodically.
+  if (EXPORT_CONTACTS) {
+    setTimeout(requestContacts, 3000);
+    setInterval(requestContacts, Math.max(CONTACTS_MS, 60000));
+  }
+
   // Outbound: bridge outbox (channel "signal") -> signal-cli send
   bridge.watchOutbox(
     async (msg) => {
@@ -143,12 +152,78 @@ function send(recipient, text) {
   console.log(`[sig] -> ${recipient}: ${text.slice(0, 60)}`);
 }
 
+// --- contacts export -----------------------------------------------------
+// Pull the linked account's contacts over the SAME jsonRpc connection (so we
+// never fight signal-cli's account lock) and write them, normalized, to
+// <bridge>/contacts/signal.json. The bridge merges all channels on `e164`.
+const sigContacts = new Map(); // +E.164 -> name
+let contactsReqId = null;
+let contactsTimer = null;
+
+function requestContacts() {
+  if (!EXPORT_CONTACTS || !proc || !proc.stdin.writable) return;
+  contactsReqId = String(++rpcId);
+  try {
+    proc.stdin.write(
+      JSON.stringify({ jsonrpc: "2.0", id: contactsReqId, method: "listContacts" }) +
+        "\n"
+    );
+  } catch (e) {
+    console.error("[sig] listContacts request:", e.message);
+  }
+}
+
+function flushContacts() {
+  if (!EXPORT_CONTACTS || contactsTimer) return;
+  contactsTimer = setTimeout(() => {
+    contactsTimer = null;
+    const records = [];
+    for (const [number, name] of sigContacts) {
+      records.push({ e164: number, handle: number, name: name || null });
+    }
+    try {
+      bridge.writeContacts("signal", records);
+      console.log(
+        `[sig] contacts: ${records.length} exported -> contacts/signal.json`
+      );
+    } catch (e) {
+      console.error("[sig] contacts write:", e.message);
+    }
+  }, 1500); // debounce bursts
+}
+
+function ingestContacts(list) {
+  if (!Array.isArray(list)) return;
+  let changed = false;
+  for (const c of list) {
+    if (!c) continue;
+    const number = c.number || (c.address && c.address.number);
+    if (!number) continue; // username/UUID-only: no E.164, skip
+    const name =
+      c.name ||
+      c.profileName ||
+      (c.profile && (c.profile.givenName || c.profile.name)) ||
+      sigContacts.get(number) ||
+      null;
+    if (sigContacts.get(number) !== name) {
+      sigContacts.set(number, name);
+      changed = true;
+    }
+  }
+  if (changed) flushContacts();
+}
+
 function handleLine(line) {
   let msg;
   try {
     msg = JSON.parse(line);
   } catch (e) {
     return; // non-JSON noise
+  }
+  // listContacts response: no `method`, carries our request id + result array.
+  if (contactsReqId && msg.id === contactsReqId && Array.isArray(msg.result)) {
+    ingestContacts(msg.result);
+    return;
   }
   if (msg.method !== "receive" || !msg.params) return;
   const env = msg.params.envelope || {};
@@ -157,6 +232,8 @@ function handleLine(line) {
   if (!data || typeof data.message !== "string" || !data.message) return;
   const from = env.sourceNumber || env.source;
   if (!from) return;
+  // Learn a contact name from whoever messages us (enrichment, any sender).
+  if (env.sourceName) ingestContacts([{ number: from, name: env.sourceName }]);
   if (ALLOWED.length === 0 || !ALLOWED.includes(from)) {
     console.log(
       `[sig] (not whitelisted) ${from}: ${data.message.slice(0, 40)} ` +
